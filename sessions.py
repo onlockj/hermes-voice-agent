@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from fastapi import WebSocket
 
@@ -12,10 +12,11 @@ class VoiceSession:
     session_id: str
     user_id: Optional[int]
     client_ws: WebSocket
-    upstream_ws: object = None  # websockets.ClientConnection
-    upstream_task: Optional[asyncio.Task] = None
+    history: List[dict] = field(default_factory=list)
+    capture_buf: bytearray = field(default_factory=bytearray)
+    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    turn_task: Optional[asyncio.Task] = None
     closed: bool = False
-    meta: Dict[str, str] = field(default_factory=dict)
 
 
 class SessionStore:

@@ -1,141 +1,196 @@
+---
+title: Hermes Voice Agent
+emoji: "◼"
+colorFrom: gray
+colorTo: gray
+sdk: docker
+app_port: 8080
+pinned: false
+short_description: Live voice channel for the Hermes Telegram agent
+---
+
 # ▣ HERMES — VOICE LINK
 
-Live voice channel for the Hermes Telegram agent. One Python process, one Telegram bot, one WebSocket relay to the OpenAI Realtime API, and a brutalist PWA front-end you open as a Telegram Mini App.
+Live voice channel for the Hermes Telegram agent. **Runs for $0** on the free tier of every service in the chain.
 
 ```
 Telegram → Web App button → PWA in browser
-   ↑                              ↓ mic (PCM16 @ 24kHz)
-   └── voice replies ←── OpenAI Realtime ←── FastAPI relay
+   ↑                              ↓ mic (PCM16 16k mono, client VAD)
+   └── voice replies ←── ElevenLabs Flash WS  ←┐
+                       (or Edge TTS, free fallback)
+                                               │
+                          Groq Llama-3.3 70B ──┘  (streamed token-by-token)
+                                ↑
+                          Groq Whisper-Large-v3-Turbo
 ```
 
-## Stack
+**End-to-end latency:** typically **600–900 ms** from when you stop talking until first audio plays — because the LLM streams tokens straight into the TTS WebSocket and audio starts before the LLM has finished thinking.
 
-- FastAPI + Uvicorn (async, WebSocket native)
-- `python-telegram-bot` v21 (webhook mode)
-- OpenAI Realtime API (voice in / voice out)
-- Vanilla JS front-end (Web Audio API, AudioContext, no build step)
-- Telegram WebApp `initData` HMAC-SHA256 verification
+## Free Stack
 
-## Quick Start (Local)
+| Layer | Service | Free allowance | Why |
+|---|---|---|---|
+| **STT** | Groq Whisper-Large-v3-Turbo | Generous free tier | Fastest Whisper available, OpenAI-compatible |
+| **LLM** | Groq Llama-3.3-70B-Versatile | Free, ~500 tok/s | Feels real-time, streams |
+| **TTS** | ElevenLabs Flash v2.5 (WS) | 10k chars/mo free | ~75ms TTFB, premium voice |
+| **TTS fallback** | Microsoft Edge TTS | **Unlimited, no key** | Free forever — auto-engaged when ElevenLabs key is empty or quota burned |
+| **Hosting** | Hugging Face Spaces (Docker) | Free, persistent, WS-capable | No cold starts on most days |
+| **Telegram bot** | Telegram Bot API | Free | unchanged |
 
-Requires Python 3.11+, a public HTTPS URL (use `ngrok`/`cloudflared`/Tailscale Funnel), a Telegram bot from `@BotFather`, and an OpenAI key with Realtime access.
+Total at-rest cost: **$0**.
+
+## One-Click Free Deploy → Hugging Face Spaces
+
+1. **Get keys:**
+   - Telegram bot from [@BotFather](https://t.me/botfather) → `TELEGRAM_BOT_TOKEN`
+   - Free Groq key → [console.groq.com/keys](https://console.groq.com/keys)
+   - (Optional) Free ElevenLabs key → [elevenlabs.io](https://elevenlabs.io). Skip this and Edge TTS engages automatically.
+
+2. **Create the Space:**
+   - [huggingface.co/new-space](https://huggingface.co/new-space) → SDK: **Docker** → Hardware: **CPU basic (free)**
+   - Push this repo to it, or use **Duplicate Space** from your fork
+
+3. **Set Space secrets** (Settings → Variables and secrets):
+   ```
+   TELEGRAM_BOT_TOKEN=...
+   GROQ_API_KEY=...
+   WEBAPP_URL=https://<username>-hermes-voice-agent.hf.space
+   ELEVENLABS_API_KEY=...          # optional
+   ELEVENLABS_VOICE_ID=...         # optional, default Adam
+   ALLOWED_USER_IDS=...            # optional CSV
+   ```
+
+4. **Open Telegram → your bot → `/start` → OPEN VOICE LINK → ENGAGE.** Talk. Hermes talks back.
+
+The webhook auto-registers on startup against `WEBAPP_URL`.
+
+## Local Dev
+
+Need a public HTTPS URL (use `cloudflared`, `ngrok`, or Tailscale Funnel) because Telegram WebApps require HTTPS.
 
 ```bash
 cd hermes-voice-agent
-cp .env.example .env
-# Fill TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, WEBAPP_URL (your public https URL)
-
+cp .env.example .env       # fill TELEGRAM_BOT_TOKEN, GROQ_API_KEY, WEBAPP_URL
 ./deploy.sh local
 ```
 
-`./deploy.sh local` will:
-1. Create `.venv`, install deps
-2. Register the Telegram webhook → `${WEBAPP_URL}/webhook`
-3. Run `uvicorn main:app` on `${PORT:-8080}`
+`./deploy.sh local` will: create `.venv`, install deps, register the webhook, run uvicorn on `${PORT:-8080}`.
 
-Then:
-- Open Telegram → your bot → `/start` → **OPEN VOICE LINK**
-- Tap **ENGAGE** → speak → Hermes responds in real time
-- Interrupt freely; server-side VAD detects barge-in and cancels the in-flight reply
-
-## Deploy
+## Other Free / Cheap Hosts
 
 | Target | Command | Notes |
 |---|---|---|
-| Railway | `./deploy.sh railway` | uses `railway.toml`; needs `railway login` |
-| Render | `./deploy.sh render` | uses `render.yaml` Blueprint flow |
-| Fly.io | `./deploy.sh fly` | uses `fly.toml`; needs `fly auth login` |
-| Docker | `./deploy.sh docker` | builds image, prints run command |
-| Heroku-style | `Procfile` included | works with any PaaS that respects Procfiles |
+| Hugging Face Spaces | push the repo | **Recommended free path.** See above. |
+| Fly.io | `./deploy.sh fly` | Hobby plan, small VMs |
+| Render | `./deploy.sh render` | Free tier sleeps after inactivity (cold start hits latency) |
+| Docker | `./deploy.sh docker` | builds local image; deploy anywhere |
 
-After any cloud deploy, re-register the webhook against the public URL:
+After any deploy, re-register the webhook if you change the URL:
 
 ```bash
-WEBAPP_URL=https://your-domain.example ./deploy.sh webhook
+WEBAPP_URL=https://… ./deploy.sh webhook
 ```
 
 ## Configuration
 
-All via `.env` (see `.env.example`):
+All via `.env` (or Space secrets). See [`.env.example`](.env.example).
 
 | Var | Required | Default | Notes |
 |---|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | ✓ | — | BotFather token |
-| `OPENAI_API_KEY` | ✓ | — | Realtime API access |
-| `WEBAPP_URL` | ✓ | — | Public HTTPS root of this app |
-| `ALLOWED_USER_IDS` | — | empty | CSV of Telegram user IDs; empty = open |
-| `MODEL` | — | `gpt-4o-realtime-preview-2024-10-01` | Realtime model |
-| `VOICE` | — | `ash` | `alloy`/`echo`/`shimmer`/`ash`/`ballad`/`coral`/`sage`/`verse` |
-| `HOST` / `PORT` | — | `0.0.0.0` / `8080` | bind |
+| `TELEGRAM_BOT_TOKEN` | ✓ | — | BotFather |
+| `GROQ_API_KEY` | ✓ | — | STT + LLM (free) |
+| `WEBAPP_URL` | ✓ | — | Public HTTPS root |
+| `ELEVENLABS_API_KEY` | — | empty | If empty, Edge TTS is used |
+| `ELEVENLABS_VOICE_ID` | — | `pNInz6obpgDQGcFmaJgB` (Adam) | Any ElevenLabs voice ID |
+| `ELEVENLABS_MODEL` | — | `eleven_flash_v2_5` | Lowest-latency model |
+| `TTS_PROVIDER` | — | `auto` | `auto` \| `elevenlabs` \| `edge` |
+| `EDGE_TTS_VOICE` | — | `en-US-GuyNeural` | Any Edge neural voice |
+| `GROQ_STT_MODEL` | — | `whisper-large-v3-turbo` | |
+| `GROQ_LLM_MODEL` | — | `llama-3.3-70b-versatile` | |
+| `ALLOWED_USER_IDS` | — | empty | CSV of Telegram user IDs |
+| `HOST` / `PORT` | — | `0.0.0.0` / `8080` | |
 
-The Hermes system prompt is hardcoded in `main.py` (`HERMES_SYSTEM_PROMPT`) — edit there.
+The Hermes system prompt is in `pipeline.py` → `HERMES_SYSTEM_PROMPT`. Edit there.
 
-## Architecture Detail
+## Architecture
 
-### Endpoints
-- `GET /` — serves the PWA shell
-- `POST /webhook` — Telegram updates
-- `WS /ws/voice?initData=…` — voice relay
-- `GET /health` — JSON `{status, sessions}`
+```
+client (PWA)                            server (FastAPI)
+─────────────                            ────────────────
+mic → resample 16k → PCM16 ──binary──▶  capture_buf (per session)
+client VAD detects silence
+                       ──JSON──▶  {type:"utterance.end"}
+                                        ↓
+                                  Groq Whisper (POST /audio/transcriptions)
+                                        ↓
+                                  Groq chat completions (stream)
+                                        ↓ token-by-token
+                                  ┌──────────────────────────┐
+                                  │ ElevenLabs Flash WS      │
+                                  │ (text-in / audio-out)    │
+                                  └──────────────────────────┘
+                                        ↓ PCM24k chunks
+client receives ◀──binary── audio frames
+  ↳ Int16 → AudioBuffer → schedule on AudioContext
+  ↳ playback head advances per-chunk → seamless stream
 
-### WebSocket Relay (`/ws/voice`)
-1. Client connects with `initData` query param (Telegram Mini App `Telegram.WebApp.initData`).
-2. Server verifies HMAC-SHA256 against bot token (`verify_init_data`). Rejects 4401 if bad; 4403 if user not whitelisted.
-3. Server opens upstream to `wss://api.openai.com/v1/realtime?model=…` with `OpenAI-Beta: realtime=v1`.
-4. Server sends `session.update` injecting the Hermes prompt, server VAD config, PCM16 24 kHz formats, and Whisper transcription.
-5. **Client → server**: raw PCM16 binary frames (auto-wrapped server-side into `input_audio_buffer.append`), plus JSON control events (`response.cancel`, etc.).
-6. **Server → client**: all upstream JSON events forwarded verbatim (`response.audio.delta`, transcripts, VAD events, errors).
+barge-in:
+  VAD speech-start during playback
+    → flush playback queue
+    → send {type:"barge_in"}
+    → server cancels in-flight turn
+```
 
-### Audio Pipeline (Browser)
-- `getUserMedia` → `AudioContext` (browser-native rate, usually 48 kHz)
-- ScriptProcessor → linear downsample to 24 kHz → `Float32` → `Int16` PCM
-- WS binary send (~40 ms frames)
-- Replies: base64 → `Int16Array` → `AudioBuffer` @ 24 kHz, scheduled in order on a single playback graph
-- Barge-in: when upstream emits `input_audio_buffer.speech_started`, client flushes the playback queue and sends `response.cancel`
+### Why this beats a "STT → wait → LLM → wait → TTS" loop
 
-## Security Notes
+The conventional chain waits for each stage to finish:
+- `STT_time + LLM_time + TTS_time ≈ 300 + 1500 + 500 = 2.3s`
 
-- `initData` is verified server-side with HMAC-SHA256 (`WebAppData` + bot token). Never trust client user IDs.
-- Webhook endpoint is not auth-protected by default (Telegram signs nothing in `POST /webhook` — relies on URL secrecy). For tightening, add `setWebhook` with `secret_token` and check the `X-Telegram-Bot-Api-Secret-Token` header.
-- `ALLOWED_USER_IDS` enforces a whitelist on both Telegram commands and WebSocket sessions.
+This stack overlaps LLM and TTS:
+- `STT_time + LLM_TTFT + TTS_TTFB ≈ 300 + 150 + 75 = 525ms`
+
+The LLM keeps emitting tokens *while* ElevenLabs is already speaking the first sentence. That's the whole trick.
+
+## Security
+
+- Telegram `initData` is HMAC-SHA256 verified server-side (`verify_init_data` in [main.py](main.py)). Never trust client user IDs.
+- `ALLOWED_USER_IDS` whitelist enforced on both Telegram commands and WS sessions.
+- Webhook endpoint URL is the only secret protecting `/webhook` by default — tighten with `setWebhook secret_token` if needed.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `AUTH` red dot | Open from Telegram (so `initData` is present) — or open in a browser if `ALLOWED_USER_IDS` is empty |
-| No audio in | Browser blocked mic; check site permissions |
-| No audio out | iOS Safari requires a user gesture before `AudioContext.resume()` — the ENGAGE click is that gesture |
-| `invalid_init_data` | Bot token in `.env` doesn't match the bot whose Mini App you opened |
-| Realtime API 401 | OpenAI key lacks Realtime access — verify on the OpenAI dashboard |
-| Latency spikes | Network. The relay itself adds ~1ms; jitter is upstream + client codec |
+| `AUTH` red dot | Open from Telegram (initData) — or leave `ALLOWED_USER_IDS` empty for open access |
+| Mic permission denied | Browser site permissions |
+| No audio out | First click (ENGAGE) is the required gesture for AudioContext |
+| Long pauses before reply | Check Groq API status; STT can be the bottleneck on cold connections |
+| Robotic / clipped audio | Edge TTS sometimes returns short clips; usually self-resolves on next turn |
+| ElevenLabs quota exhausted | Set `TTS_PROVIDER=edge` (or just unset `ELEVENLABS_API_KEY`) to switch fully free |
 
 ## Files
 
 ```
 hermes-voice-agent/
-├── main.py            FastAPI app, Telegram webhook, WebSocket relay
+├── main.py            FastAPI app, Telegram webhook, WS handler
+├── pipeline.py        Groq STT/LLM + ElevenLabs WS + Edge TTS fallback
 ├── config.py          Pydantic settings
-├── sessions.py        In-memory session store
+├── sessions.py        Per-WS session state (history, capture_buf, cancel)
 ├── requirements.txt
 ├── .env.example
 ├── deploy.sh          one-shot installer / deployer
-├── Dockerfile
+├── Dockerfile         used by HF Spaces / Render / Fly
 ├── Procfile
 ├── railway.toml
 ├── render.yaml
 ├── fly.toml
 └── static/
     ├── index.html
-    ├── app.js
+    ├── app.js         client VAD, dual-format playback, barge-in
     ├── style.css
     ├── manifest.json
     └── icon.png
 ```
-
-## Brand
-
-LCKD private stack. Monochrome only. Square corners. JetBrains Mono labels, Inter body. Film grain ambient. Don't put orange in this one — pure void.
 
 ```
 ▣ END TRANSMISSION

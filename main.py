@@ -1,9 +1,10 @@
-"""Hermes Voice Agent — FastAPI + Telegram + OpenAI Realtime relay.
+"""Hermes Voice Agent — FastAPI + Telegram + free streaming pipeline.
 
-Single deployable unit:
-- POST /webhook  → Telegram updates
-- GET  /        → Voice PWA (static/index.html)
-- WS   /ws/voice → Client mic ⇄ OpenAI Realtime API relay
+Endpoints:
+  POST /webhook       Telegram updates
+  GET  /              Voice PWA (static/index.html)
+  WS   /ws/voice      Client mic ⇄ Groq STT/LLM ⇄ ElevenLabs/Edge TTS
+  GET  /health        liveness
 """
 
 from __future__ import annotations
@@ -19,16 +20,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-import httpx
-import websockets
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from config import settings
-from sessions import SessionStore, VoiceSession, store
+from pipeline import run_turn
+from sessions import VoiceSession, store
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,16 +39,6 @@ log = logging.getLogger("hermes")
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
 
-HERMES_SYSTEM_PROMPT = (
-    "You are Hermes, the voice-enabled execution agent for LCKD. "
-    "You speak with precision, speed, and tactical clarity. "
-    "Your user is a solo operator building autonomous systems. "
-    "Keep responses concise. You can be interrupted. "
-    "Acknowledge commands with 'Copy that' or 'Executing.'"
-)
-
-OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model={model}"
-
 telegram_app: Optional[Application] = None
 
 
@@ -57,21 +47,17 @@ telegram_app: Optional[Application] = None
 # ────────────────────────────────────────────────────────────────────
 
 
+def _allowed(user_id: int) -> bool:
+    return not settings.allowed_user_ids or user_id in settings.allowed_user_ids
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if settings.allowed_user_ids and user.id not in settings.allowed_user_ids:
+    if not _allowed(user.id):
         await update.message.reply_text("Access denied.")
         return
-
     kb = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "▣ OPEN VOICE LINK",
-                    web_app=WebAppInfo(url=settings.webapp_url),
-                )
-            ]
-        ]
+        [[InlineKeyboardButton("▣ OPEN VOICE LINK", web_app=WebAppInfo(url=settings.webapp_url))]]
     )
     await update.message.reply_text(
         "HERMES VOICE LINK\n"
@@ -84,7 +70,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if settings.allowed_user_ids and user.id not in settings.allowed_user_ids:
+    if not _allowed(user.id):
         await update.message.reply_text("Access denied.")
         return
     kb = InlineKeyboardMarkup(
@@ -97,7 +83,7 @@ def build_telegram_app() -> Application:
     app = (
         Application.builder()
         .token(settings.telegram_bot_token)
-        .updater(None)  # webhook mode
+        .updater(None)
         .build()
     )
     app.add_handler(CommandHandler("start", cmd_start))
@@ -111,10 +97,6 @@ def build_telegram_app() -> Application:
 
 
 def verify_init_data(init_data: str, bot_token: str) -> Optional[dict]:
-    """Validate Telegram WebApp initData per HMAC-SHA256 spec.
-
-    Returns parsed payload (dict) if valid, else None.
-    """
     if not init_data:
         return None
     try:
@@ -122,14 +104,9 @@ def verify_init_data(init_data: str, bot_token: str) -> Optional[dict]:
         received_hash = parsed.pop("hash", None)
         if not received_hash:
             return None
-
-        data_check_string = "\n".join(
-            f"{k}={parsed[k]}" for k in sorted(parsed.keys())
-        )
+        data_check_string = "\n".join(f"{k}={parsed[k]}" for k in sorted(parsed.keys()))
         secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
-        calc_hash = hmac.new(
-            secret_key, data_check_string.encode(), hashlib.sha256
-        ).hexdigest()
+        calc_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(calc_hash, received_hash):
             return None
         if "user" in parsed:
@@ -139,12 +116,12 @@ def verify_init_data(init_data: str, bot_token: str) -> Optional[dict]:
                 pass
         return parsed
     except Exception as e:
-        log.warning("initData verification error: %s", e)
+        log.warning("initData verify error: %s", e)
         return None
 
 
 # ────────────────────────────────────────────────────────────────────
-# FastAPI lifespan
+# Lifespan
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -154,8 +131,6 @@ async def lifespan(app: FastAPI):
     telegram_app = build_telegram_app()
     await telegram_app.initialize()
     await telegram_app.start()
-
-    # Register webhook
     webhook_url = f"{settings.webapp_url}/webhook"
     try:
         await telegram_app.bot.set_webhook(
@@ -165,10 +140,8 @@ async def lifespan(app: FastAPI):
         )
         log.info("Webhook set: %s", webhook_url)
     except Exception as e:
-        log.warning("Failed to set webhook automatically: %s", e)
-
+        log.warning("Failed to set webhook: %s", e)
     yield
-
     try:
         await telegram_app.stop()
         await telegram_app.shutdown()
@@ -186,7 +159,13 @@ app = FastAPI(title="Hermes Voice Agent", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "sessions": store.count()}
+    return {
+        "status": "ok",
+        "sessions": store.count(),
+        "tts_provider": settings.resolved_tts_provider(),
+        "llm": settings.groq_llm_model,
+        "stt": settings.groq_stt_model,
+    }
 
 
 @app.post("/webhook")
@@ -208,65 +187,65 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 # ────────────────────────────────────────────────────────────────────
-# Voice relay WebSocket
+# Voice WebSocket
 # ────────────────────────────────────────────────────────────────────
 
 
-async def _pump_upstream_to_client(session: VoiceSession) -> None:
-    """Forward OpenAI Realtime events → client WebSocket."""
+async def _send_audio(session: VoiceSession, fmt: str, data: bytes) -> None:
+    if session.closed:
+        return
     try:
-        async for raw in session.upstream_ws:
-            if session.closed:
-                break
-            try:
-                await session.client_ws.send_text(raw if isinstance(raw, str) else raw.decode())
-            except Exception:
-                break
-    except websockets.ConnectionClosed:
-        pass
+        await session.client_ws.send_json({"type": "audio", "format": fmt, "bytes": len(data)})
+        await session.client_ws.send_bytes(data)
     except Exception as e:
-        log.warning("upstream→client pump error: %s", e)
-    finally:
+        log.debug("audio send failed: %s", e)
+
+
+async def _send_event(session: VoiceSession, evt: dict) -> None:
+    if session.closed:
+        return
+    try:
+        await session.client_ws.send_json(evt)
+    except Exception as e:
+        log.debug("event send failed: %s", e)
+
+
+async def _start_turn(session: VoiceSession) -> None:
+    """Kick off a STT→LLM→TTS pipeline turn for the buffered audio."""
+    if session.turn_task and not session.turn_task.done():
+        return  # already running
+    audio = bytes(session.capture_buf)
+    session.capture_buf.clear()
+    if not audio:
+        return
+    session.cancel_event = asyncio.Event()
+
+    async def runner():
         try:
-            await session.client_ws.close()
-        except Exception:
-            pass
+            await run_turn(
+                pcm_audio=audio,
+                history=session.history,
+                audio_sink=lambda fmt, data: _send_audio(session, fmt, data),
+                event_sink=lambda evt: _send_event(session, evt),
+                cancel_event=session.cancel_event,
+            )
+            # Keep last 16 turns
+            if len(session.history) > 32:
+                session.history[:] = session.history[-32:]
+        except Exception as e:
+            log.warning("turn error: %s", e)
+            await _send_event(session, {"type": "error", "stage": "pipeline", "message": str(e)})
+
+    session.turn_task = asyncio.create_task(runner())
 
 
-async def _open_upstream(session: VoiceSession) -> None:
-    url = OPENAI_REALTIME_URL.format(model=settings.model)
-    headers = {
-        "Authorization": f"Bearer {settings.openai_api_key}",
-        "OpenAI-Beta": "realtime=v1",
-    }
-    session.upstream_ws = await websockets.connect(
-        url,
-        additional_headers=headers,
-        max_size=16 * 1024 * 1024,
-        ping_interval=20,
-    )
-
-    # Configure session
-    session_update = {
-        "type": "session.update",
-        "session": {
-            "modalities": ["audio", "text"],
-            "instructions": HERMES_SYSTEM_PROMPT,
-            "voice": settings.voice,
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
-            "input_audio_transcription": {"model": "whisper-1"},
-            "turn_detection": {
-                "type": "server_vad",
-                "threshold": 0.5,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": 500,
-            },
-            "temperature": 0.7,
-        },
-    }
-    await session.upstream_ws.send(json.dumps(session_update))
-    session.upstream_task = asyncio.create_task(_pump_upstream_to_client(session))
+async def _cancel_turn(session: VoiceSession) -> None:
+    session.cancel_event.set()
+    if session.turn_task and not session.turn_task.done():
+        try:
+            await asyncio.wait_for(session.turn_task, timeout=2.0)
+        except asyncio.TimeoutError:
+            session.turn_task.cancel()
 
 
 @app.websocket("/ws/voice")
@@ -280,27 +259,20 @@ async def ws_voice(
     if init_data:
         parsed = verify_init_data(init_data, settings.telegram_bot_token)
         if parsed is None:
-            await websocket.send_text(
-                json.dumps({"type": "error", "error": "invalid_init_data"})
-            )
+            await websocket.send_json({"type": "error", "error": "invalid_init_data"})
             await websocket.close(code=4401)
             return
         user = parsed.get("user")
         if isinstance(user, dict):
             user_id = user.get("id")
-            if settings.allowed_user_ids and user_id not in settings.allowed_user_ids:
-                await websocket.send_text(
-                    json.dumps({"type": "error", "error": "forbidden"})
-                )
+            if not _allowed(user_id):
+                await websocket.send_json({"type": "error", "error": "forbidden"})
                 await websocket.close(code=4403)
                 return
-    else:
-        if settings.allowed_user_ids:
-            await websocket.send_text(
-                json.dumps({"type": "error", "error": "auth_required"})
-            )
-            await websocket.close(code=4401)
-            return
+    elif settings.allowed_user_ids:
+        await websocket.send_json({"type": "error", "error": "auth_required"})
+        await websocket.close(code=4401)
+        return
 
     session = VoiceSession(
         session_id=secrets.token_urlsafe(12),
@@ -308,55 +280,57 @@ async def ws_voice(
         client_ws=websocket,
     )
     await store.add(session)
-    log.info("session opened id=%s user=%s", session.session_id, user_id)
+    log.info("session open id=%s user=%s", session.session_id, user_id)
+
+    await websocket.send_json(
+        {
+            "type": "ready",
+            "session": session.session_id,
+            "tts_provider": settings.resolved_tts_provider(),
+            "audio_in_sr": 16000,
+            "audio_out_sr": 24000,
+        }
+    )
 
     try:
-        await _open_upstream(session)
-        await websocket.send_text(json.dumps({"type": "ready", "session": session.session_id}))
-
         while True:
             msg = await websocket.receive()
             if msg.get("type") == "websocket.disconnect":
                 break
-            if "text" in msg and msg["text"] is not None:
-                # Client control / event passthrough
-                try:
-                    data = json.loads(msg["text"])
-                except json.JSONDecodeError:
-                    continue
-                # Forward known event types upstream
-                kind = data.get("type")
-                if kind in {
-                    "input_audio_buffer.append",
-                    "input_audio_buffer.commit",
-                    "input_audio_buffer.clear",
-                    "response.create",
-                    "response.cancel",
-                    "conversation.item.create",
-                }:
-                    await session.upstream_ws.send(json.dumps(data))
-            elif "bytes" in msg and msg["bytes"] is not None:
-                # Binary audio frame from client (raw pcm16). Wrap as buffer append.
-                import base64
 
-                evt = {
-                    "type": "input_audio_buffer.append",
-                    "audio": base64.b64encode(msg["bytes"]).decode(),
-                }
-                await session.upstream_ws.send(json.dumps(evt))
+            if msg.get("bytes") is not None:
+                # Raw PCM16 16kHz mono frame from client
+                session.capture_buf.extend(msg["bytes"])
+                continue
+
+            if msg.get("text") is None:
+                continue
+
+            try:
+                data = json.loads(msg["text"])
+            except json.JSONDecodeError:
+                continue
+
+            kind = data.get("type")
+            if kind == "utterance.end":
+                await _start_turn(session)
+            elif kind == "barge_in" or kind == "cancel":
+                await _cancel_turn(session)
+                session.capture_buf.clear()
+            elif kind == "reset":
+                await _cancel_turn(session)
+                session.history.clear()
+                session.capture_buf.clear()
+                await _send_event(session, {"type": "reset.done"})
+            elif kind == "ping":
+                await _send_event(session, {"type": "pong"})
     except WebSocketDisconnect:
         pass
     except Exception as e:
         log.warning("ws_voice error: %s", e)
     finally:
         session.closed = True
-        if session.upstream_ws is not None:
-            try:
-                await session.upstream_ws.close()
-            except Exception:
-                pass
-        if session.upstream_task is not None:
-            session.upstream_task.cancel()
+        await _cancel_turn(session)
         await store.remove(session.session_id)
         log.info("session closed id=%s", session.session_id)
 
@@ -369,9 +343,4 @@ async def ws_voice(
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(
-        "main:app",
-        host=settings.host,
-        port=settings.port,
-        log_level="info",
-    )
+    uvicorn.run("main:app", host=settings.host, port=settings.port, log_level="info")

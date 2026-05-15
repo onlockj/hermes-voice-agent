@@ -38,11 +38,19 @@ write_env() {
     : > .env
     echo "Enter required values:"
     prompt_env TELEGRAM_BOT_TOKEN "" secret
-    prompt_env OPENAI_API_KEY "" secret
+    prompt_env GROQ_API_KEY "" secret
     prompt_env WEBAPP_URL "" plain
+    echo
+    echo -e "${DIM}Optional: ElevenLabs key for premium voice (leave blank to use free Edge TTS)${NC}"
+    read -rp "  ELEVENLABS_API_KEY (optional): " ELEVENLABS_KEY
+    echo "ELEVENLABS_API_KEY=${ELEVENLABS_KEY}" >> .env
+    echo "ELEVENLABS_VOICE_ID=pNInz6obpgDQGcFmaJgB" >> .env
+    echo "ELEVENLABS_MODEL=eleven_flash_v2_5" >> .env
+    echo "TTS_PROVIDER=auto" >> .env
+    echo "EDGE_TTS_VOICE=en-US-GuyNeural" >> .env
+    echo "GROQ_STT_MODEL=whisper-large-v3-turbo" >> .env
+    echo "GROQ_LLM_MODEL=llama-3.3-70b-versatile" >> .env
     echo "ALLOWED_USER_IDS=" >> .env
-    echo "MODEL=gpt-4o-realtime-preview-2024-10-01" >> .env
-    echo "VOICE=ash" >> .env
     echo "HOST=0.0.0.0" >> .env
     echo "PORT=8080" >> .env
   fi
@@ -102,13 +110,34 @@ deploy_fly() {
   require fly
   echo -e "${CYAN}» Deploying to Fly.io${NC}"
   fly launch --no-deploy --copy-config --name hermes-voice-agent || true
-  fly secrets set \
-    TELEGRAM_BOT_TOKEN="$(grep ^TELEGRAM_BOT_TOKEN .env | cut -d= -f2-)" \
-    OPENAI_API_KEY="$(grep ^OPENAI_API_KEY .env | cut -d= -f2-)" \
-    WEBAPP_URL="$(grep ^WEBAPP_URL .env | cut -d= -f2-)" \
-    ALLOWED_USER_IDS="$(grep ^ALLOWED_USER_IDS .env | cut -d= -f2-)"
+  # Push every non-empty .env line as a fly secret
+  while IFS='=' read -r key val; do
+    [ -z "$key" ] || [ "${key:0:1}" = "#" ] && continue
+    [ -z "$val" ] && continue
+    fly secrets set "$key=$val" || true
+  done < .env
   fly deploy
   set_webhook
+}
+
+deploy_hf() {
+  echo -e "${CYAN}» Hugging Face Spaces (free, recommended)${NC}"
+  cat <<'EOM'
+
+  1. Go to https://huggingface.co/new-space
+       Name: hermes-voice-agent
+       SDK:  Docker
+       Hardware: CPU basic (free)
+  2. Push this repo:
+       git remote add hf https://huggingface.co/spaces/<your-username>/hermes-voice-agent
+       git push hf main
+  3. Set these Space secrets (Settings → Variables and secrets):
+       TELEGRAM_BOT_TOKEN, GROQ_API_KEY,
+       WEBAPP_URL=https://<your-username>-hermes-voice-agent.hf.space
+       (optional) ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, ALLOWED_USER_IDS
+  4. After it boots, the bot will auto-register its webhook against WEBAPP_URL.
+
+EOM
 }
 
 deploy_docker() {
@@ -125,6 +154,7 @@ ${BOLD}Usage:${NC} ./deploy.sh <target>
 
 Targets:
   local      Install deps and run the server locally (uvicorn)
+  hf         Print Hugging Face Spaces deploy steps (free, recommended)
   railway    Deploy to Railway (needs: railway CLI logged in)
   render     Print Render Blueprint steps
   fly        Deploy to Fly.io (needs: fly CLI logged in)
@@ -149,6 +179,7 @@ main() {
   local target="${1:-help}"
   case "$target" in
     local)    require python3; write_env; install_local; set_webhook; run_local ;;
+    hf)       deploy_hf ;;
     railway)  write_env; deploy_railway ;;
     render)   write_env; deploy_render ;;
     fly)      write_env; deploy_fly ;;
