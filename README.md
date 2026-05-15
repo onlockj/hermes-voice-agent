@@ -1,11 +1,12 @@
 ---
 title: Hermes Voice Agent
-emoji: "◼"
+emoji: 🎙️
 colorFrom: gray
 colorTo: gray
 sdk: docker
 app_port: 8080
 pinned: false
+license: mit
 short_description: Live voice channel for the Hermes Telegram agent
 ---
 
@@ -34,8 +35,8 @@ Telegram → Web App button → PWA in browser
 | **LLM** | Groq Llama-3.3-70B-Versatile | Free, ~500 tok/s | Feels real-time, streams |
 | **TTS** | ElevenLabs Flash v2.5 (WS) | 10k chars/mo free | ~75ms TTFB, premium voice |
 | **TTS fallback** | Microsoft Edge TTS | **Unlimited, no key** | Free forever — auto-engaged when ElevenLabs key is empty or quota burned |
-| **Hosting** | Hugging Face Spaces (Docker) | Free, persistent, WS-capable | No cold starts on most days |
-| **Telegram bot** | Telegram Bot API | Free | unchanged |
+| **Hosting** | Hugging Face Spaces (Docker) | Free CPU, WS-capable | Persistent on active use; sleeps after ~48h idle, ~10s cold wake |
+| **Telegram bot** | Telegram Bot API | Free | webhook mode, no polling cost |
 
 Total at-rest cost: **$0**.
 
@@ -46,30 +47,46 @@ Total at-rest cost: **$0**.
    - Free Groq key → [console.groq.com/keys](https://console.groq.com/keys)
    - (Optional) Free ElevenLabs key → [elevenlabs.io](https://elevenlabs.io). Skip this and Edge TTS engages automatically.
 
-2. **Create the Space:**
-   - [huggingface.co/new-space](https://huggingface.co/new-space) → SDK: **Docker** → Hardware: **CPU basic (free)**
-   - Push this repo to it, or use **Duplicate Space** from your fork
+2. **Create the Space** — [huggingface.co/new-space](https://huggingface.co/new-space)
+   - Owner: `<your-hf-username>`
+   - Space name: `hermes-voice-agent`
+   - SDK: **Docker** (blank template)
+   - Hardware: **CPU basic — free**
+   - Visibility: your choice
 
-3. **Set Space secrets** (Settings → Variables and secrets):
+3. **Push this repo into the Space** (the Space gives you a git URL):
+
+   ```bash
+   git clone https://github.com/onlockj/hermes-voice-agent && cd hermes-voice-agent
+   git remote add hf https://huggingface.co/spaces/<your-hf-username>/hermes-voice-agent
+   git push hf main
+   ```
+
+   HF will prompt for username + access token — generate one at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) with `write` scope.
+
+4. **Set Space secrets** — in the Space UI: **Settings → Variables and secrets**:
+
    ```
    TELEGRAM_BOT_TOKEN=...
    GROQ_API_KEY=...
-   WEBAPP_URL=https://<username>-hermes-voice-agent.hf.space
-   ELEVENLABS_API_KEY=...          # optional
+   WEBAPP_URL=https://<your-hf-username>-hermes-voice-agent.hf.space
+   ELEVENLABS_API_KEY=...          # optional — leave blank for free Edge TTS
    ELEVENLABS_VOICE_ID=...         # optional, default Adam
-   ALLOWED_USER_IDS=...            # optional CSV
+   ALLOWED_USER_IDS=...            # optional CSV of Telegram user IDs
    ```
 
-4. **Open Telegram → your bot → `/start` → OPEN VOICE LINK → ENGAGE.** Talk. Hermes talks back.
+   The Space restarts automatically after secrets are saved.
+
+5. **Open Telegram → your bot → `/start` → ▣ OPEN VOICE LINK → ENGAGE.** Talk. Hermes talks back.
 
 The webhook auto-registers on startup against `WEBAPP_URL`.
 
 ## Local Dev
 
-Need a public HTTPS URL (use `cloudflared`, `ngrok`, or Tailscale Funnel) because Telegram WebApps require HTTPS.
+Requires **Python 3.11+** and a public HTTPS URL (use `cloudflared`, `ngrok`, or Tailscale Funnel) because Telegram WebApps require HTTPS.
 
 ```bash
-cd hermes-voice-agent
+git clone https://github.com/onlockj/hermes-voice-agent && cd hermes-voice-agent
 cp .env.example .env       # fill TELEGRAM_BOT_TOKEN, GROQ_API_KEY, WEBAPP_URL
 ./deploy.sh local
 ```
@@ -125,13 +142,22 @@ client VAD detects silence
                                         ↓
                                   Groq chat completions (stream)
                                         ↓ token-by-token
-                                  ┌──────────────────────────┐
-                                  │ ElevenLabs Flash WS      │
-                                  │ (text-in / audio-out)    │
-                                  └──────────────────────────┘
-                                        ↓ PCM24k chunks
-client receives ◀──binary── audio frames
-  ↳ Int16 → AudioBuffer → schedule on AudioContext
+                          ┌─────────────────────────────────────┐
+                          │  TTS provider (resolved at runtime) │
+                          ├─────────────────────────────────────┤
+                          │  ELEVENLABS (preferred if key set): │
+                          │   open WS, pipe tokens in,          │
+                          │   stream PCM24k chunks out          │
+                          │                                     │
+                          │  EDGE TTS (fallback, no key):       │
+                          │   buffer per sentence,              │
+                          │   synthesize MP3, send whole blob   │
+                          └─────────────────────────────────────┘
+                                        ↓ audio frames
+                          {type:"audio", format:"pcm16_24k"|"mp3"} + binary
+client receives ◀──────────────────
+  ↳ pcm16_24k → Int16 → AudioBuffer → schedule on AudioContext
+  ↳ mp3       → AudioContext.decodeAudioData → schedule
   ↳ playback head advances per-chunk → seamless stream
 
 barge-in:
@@ -168,6 +194,10 @@ The LLM keeps emitting tokens *while* ElevenLabs is already speaking the first s
 | Robotic / clipped audio | Edge TTS sometimes returns short clips; usually self-resolves on next turn |
 | ElevenLabs quota exhausted | Set `TTS_PROVIDER=edge` (or just unset `ELEVENLABS_API_KEY`) to switch fully free |
 
+## License
+
+MIT — see [LICENSE](LICENSE).
+
 ## Files
 
 ```
@@ -184,6 +214,7 @@ hermes-voice-agent/
 ├── railway.toml
 ├── render.yaml
 ├── fly.toml
+├── LICENSE
 └── static/
     ├── index.html
     ├── app.js         client VAD, dual-format playback, barge-in
