@@ -1,0 +1,13 @@
+{
+  "name": "Hermes Voice Link",
+  "short_name": "Hermes",
+  "description": "Live voice channel to the Hermes execution agent.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a0a0a",
+  "theme_color": "#0a0a0a",
+  "icons": [
+    { "src": "/static/icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

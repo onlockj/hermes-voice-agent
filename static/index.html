@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+<meta name="theme-color" content="#0a0a0a" />
+<title>HERMES // VOICE LINK</title>
+<link rel="manifest" href="/static/manifest.json" />
+<link rel="icon" href="/static/icon.png" />
+<link rel="stylesheet" href="/static/style.css" />
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+<div class="grain"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">▣</span>
+    <span class="title">HERMES</span>
+    <span class="subtitle">// VOICE LINK</span>
+  </div>
+  <div class="status">
+    <span id="status-dot" class="dot dot--idle"></span>
+    <span id="status-text" class="status-text">STANDBY</span>
+  </div>
+</header>
+
+<main class="stage">
+  <canvas id="viz" class="viz"></canvas>
+
+  <div class="hud">
+    <div class="hud__row">
+      <span class="hud__label">SESSION</span>
+      <span id="session-id" class="hud__value">—</span>
+    </div>
+    <div class="hud__row">
+      <span class="hud__label">MODEL</span>
+      <span class="hud__value">REALTIME</span>
+    </div>
+    <div class="hud__row">
+      <span class="hud__label">LATENCY</span>
+      <span id="latency" class="hud__value">—</span>
+    </div>
+  </div>
+
+  <div class="caption" id="caption"></div>
+
+  <div class="controls">
+    <button id="connect-btn" class="btn btn--primary">▶ ENGAGE</button>
+    <button id="mute-btn" class="btn" disabled>◉ MUTE</button>
+    <button id="disconnect-btn" class="btn btn--danger" disabled>■ DISENGAGE</button>
+  </div>
+</main>
+
+<footer class="footer">
+  <span>LCKD · PRIVATE STACK</span>
+  <span id="build">v1.0</span>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

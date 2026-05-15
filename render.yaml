@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: hermes-voice-agent
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: WEBAPP_URL
+        sync: false
+      - key: ALLOWED_USER_IDS
+        sync: false
+      - key: MODEL
+        value: gpt-4o-realtime-preview-2024-10-01
+      - key: VOICE
+        value: ash
+      - key: PORT
+        value: 8080
